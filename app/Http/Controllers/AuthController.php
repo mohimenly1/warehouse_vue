@@ -8,6 +8,7 @@ use App\Models\WarehouseStaff;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -20,8 +21,8 @@ class AuthController extends Controller
                 'name' => 'required|string|max:255',
                 'username' => 'required|string|max:255|unique:users',
                 'email' => 'nullable|string|email|max:255|unique:users',
-                'password' => 'required|string',
-                'user_type' => 'required|string',
+                'password' => 'required|string|min:6',
+                'user_type' => 'required|string|in:trader,normal',
             ]);
     
             $user = User::create([
@@ -30,25 +31,32 @@ class AuthController extends Controller
                 'email' => $validated['email'],
                 'password' => bcrypt($validated['password']),
                 'user_type' => $validated['user_type'],
+                'status' => 'inactive', // Default status
+                'is_paid' => 0, // Default payment status
             ]);
     
-            $token = $user->createToken('auth_token')->plainTextToken;
-    
             return response()->json([
+                'message' => 'User registered successfully. Awaiting payment and admin approval.',
                 'user' => [
                     'id' => $user->id,
                     'name' => $user->name,
                     'username' => $user->username,
                 ],
-                'auth_token' => $token,
             ], 201);
         } catch (ValidationException $e) {
             return response()->json([
                 'message' => 'Validation Failed',
                 'errors' => $e->errors(),
             ], 422);
+        } catch (\Exception $e) {
+            Log::error('Registration Error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            return response()->json([
+                'message' => 'Server error occurred.',
+            ], 500);
         }
     }
+    
+    
     
     // Login user
     public function login(Request $request)
@@ -65,12 +73,19 @@ class AuthController extends Controller
         }
     
         $user = Auth::user();
+    
+        // Check if user is active and has paid
+        if ($user->status !== 'active' || $user->is_paid !== 1) {
+            return response()->json([
+                'message' => 'Account is not active or payment is pending.',
+            ], 403);
+        }
+    
         $token = $user->createToken('auth_token')->plainTextToken;
     
         $warehouse = Warehouse::where('user_id', $user->id)->first();
         $warehouseStaff = WarehouseStaff::where('user_id', $user->id)->first();
-
-
+    
         return response()->json([
             'user' => [
                 'id' => $user->id,
@@ -78,10 +93,12 @@ class AuthController extends Controller
                 'username' => $user->username,
                 'user_type' => $user->user_type,
                 'warehouse_id' => $warehouse ? $warehouse->id : ($warehouseStaff ? $warehouseStaff->warehouse_id : null), // Handle warehouse_id gracefully
+                'warehouse_name' => $warehouse ? $warehouse->name : ($warehouseStaff ? $warehouseStaff->warehouse->name : null), // Return warehouse name
             ],
             'auth_token' => $token,
         ]);
     }
+    
     
     // Logout user
     public function logout(Request $request)

@@ -23,7 +23,9 @@ class User extends Authenticatable
         'email',
         'username',
         'password',
-        'user_type'
+        'user_type',
+        'is_paid',
+        'status',
     ];
 
     /**
@@ -56,6 +58,11 @@ class User extends Authenticatable
           return $this->hasMany(Product::class);
       }
   
+      public function subscription()
+{
+    return $this->hasOne(Subscription::class);
+}
+
       public function notifications()
       {
           return $this->hasMany(Notification::class);

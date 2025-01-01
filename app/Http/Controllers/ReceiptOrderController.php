@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Limit;
 use App\Models\Product;
 use App\Models\ReceiptOrder;
 use App\Models\ReceiptOrderItem;
@@ -46,7 +47,7 @@ class ReceiptOrderController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'warehouse_id' => 'required|exists:warehouses,id', // Ensure warehouse exists
+            'warehouse_id' => 'required|exists:warehouses,id',
             'warehouse_name' => 'required|string|max:255',
             'supplier_name' => 'required|string|max:255',
             'supplier_address' => 'required|string|max:255',
@@ -63,9 +64,32 @@ class ReceiptOrderController extends Controller
             'items.*.expiration_date' => 'nullable|date',
         ]);
     
-        DB::transaction(function () use ($request) {
+        // Wrap the operation in a transaction
+        return DB::transaction(function () use ($request) {
+            $warehouseId = $request->warehouse_id;
+    
+            // Fetch the warehouse limits
+            $limit = Limit::where('warehouse_id', $warehouseId)->first();
+            if (!$limit) {
+                return response()->json(['error' => 'No limits defined for this warehouse.'], 422);
+            }
+    
+            // Check the current product count in the warehouse
+            $currentProductCount = Product::where('warehouse_id', $warehouseId)->count();
+            if ($currentProductCount >= $limit->max_products) {
+                abort(422, 'Warehouse product limit reached!');
+            }
+            
+            $currentTotalQuantity = StorageRecord::where('warehouse_id', $warehouseId)->sum('quantity');
+            $newTotalQuantity = $currentTotalQuantity + array_sum(array_column($request->items, 'quantity_received'));
+            if ($newTotalQuantity > $limit->max_quantity) {
+                abort(422, 'Warehouse quantity limit exceeded!');
+            }
+            
+    
+            // Create the receipt order
             $receiptOrder = ReceiptOrder::create($request->only([
-                'warehouse_id', // Now included directly
+                'warehouse_id',
                 'warehouse_name',
                 'supplier_name',
                 'supplier_address',
@@ -74,12 +98,13 @@ class ReceiptOrderController extends Controller
                 'notes',
             ]));
     
+            // Process each item in the order
             foreach ($request->items as $itemData) {
                 $product = Product::firstOrCreate(
                     ['name' => $itemData['product_name']],
                     [
                         'category_id' => $itemData['category_id'] ?? null,
-                        'warehouse_id' => $request->warehouse_id,
+                        'warehouse_id' => $warehouseId,
                         'user_id' => $request->user_id ?? null,
                         'description' => 'Created from Receipt Order',
                         'wholesale_price' => $itemData['wholesale_price'],
@@ -88,7 +113,7 @@ class ReceiptOrderController extends Controller
                     ]
                 );
     
-                $receiptOrderItem = ReceiptOrderItem::create([
+                ReceiptOrderItem::create([
                     'receipt_order_id' => $receiptOrder->id,
                     'product_id' => $product->id,
                     'quantity_received' => $itemData['quantity_received'],
@@ -102,7 +127,7 @@ class ReceiptOrderController extends Controller
                 $storageRecord = StorageRecord::firstOrCreate(
                     [
                         'product_id' => $product->id,
-                        'warehouse_id' => $request->warehouse_id,
+                        'warehouse_id' => $warehouseId,
                     ],
                     [
                         'entry_date' => now(),
@@ -112,12 +137,14 @@ class ReceiptOrderController extends Controller
                 );
     
                 $storageRecord->increment('quantity', $itemData['quantity_received']);
-                StorageRecord::updateProductStatus($product->id, $request->warehouse_id);
+                StorageRecord::updateProductStatus($product->id, $warehouseId);
             }
-        });
     
-        return response()->json(['message' => 'Receipt order created successfully']);
+            return response()->json(['message' => 'Receipt order created successfully'], 201);
+        }, 5); // Retry 5 times in case of deadlock
     }
+    
+    
     
     
     
